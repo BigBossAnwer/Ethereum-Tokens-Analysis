@@ -1,6 +1,6 @@
 ---
 title: "Ethereum Token Analysis"
-author: "Tiffany Do and Salman Anwer"
+author: "Salman Anwer and Tiffany Do"
 date: "May 8th, 2019"
 output:
   html_document: default
