@@ -1,0 +1,960 @@
+---
+title: "Ethereum Token Analysis"
+author: "Tiffany Do and Salman Anwer"
+date: "May 8th, 2019"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+  fontsize: 10pt
+bibliography: bibliography.bib
+editor_options: 
+  chunk_output_type: console
+---
+<style type="text/css">
+pre {
+  overflow-x: auto;
+}
+pre code {
+  word-wrap: normal;
+  white-space: pre;
+}
+</style>
+ 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, cache=TRUE, warning=FALSE, message=FALSE)
+rm(list=ls())
+options(width=999)
+library(ggplot2)
+library(tidyverse)
+library(fitdistrplus)
+library(anytime)
+```
+
+## Problem Description
+
+### Ethereum and ERC20 tokens 
+\small
+We will be working with Ethereum and ERC20 tokens. Ethereum is a decentralized cryptocurrency that uses a built-in currency called Ether. Ether powers "smart contracts" that live on its blockchain. These contracts act as a program that provides various services. In this sense, Ethereum can be seen as an expanded version of Bitcoin with a similar underlying blockchain technology [@delmolino2015]. Unlike currencies, a token is not native to a blockchain and is instead created on top of a blockchain abiding to some sort of "smart contract". ERC20 is a common standard for Ethereum smart contracts that specifies a set of functions and events that smart contracts should implement. Due to these standards, it is easy to identify ERC20 tokens in the Ethereum ecosystem. These tokens represent a wide variety of digital assets and their value depends on what their underlying representation [@chen2018].  
+
+### Primary Tokens
+As there are a vast array of potential coins to stake our analysis on, we randomly selected three prominent coins to focus an otherwise unwieldly analysis. We primarily focus our attentions on: 
+
+1. Golem (GNT)
+2. Status (SNT)
+3. Basic Attention Token (BAT)
+
+Golem provides a service where users rent out other users' machines for computing power. A providers sets a price in GNT and a user can choose to rent out their machine [@golem]. Status is a mobile application that is a decentralized browser and private messenger that can also run Ethereum DApps. SNT is required to access certain features of Status and serves as a sort of "stakehold". Users holding SNT will determine where the application is headed [@sessa_2018]. Finally, the Basic Attention Token is a digital advertising payment token that seeks to "fix the broken state of the current digital advertising space" by making digital advertising more transparent, both on the user and advertiser-end. This token leverages the Brave browser, allowing users to earn BAT by paying attention to ads. Users can then use these tokens to purchase pay-walled articles, premium digital services, or donate to their favorite content makers. Publishers earn back a portion of revenue previously lost to middle-men in the space, and advertisers get more relevant user-market data [@buchko_2018].
+
+### Project Goals and Scope
+There are two primary goals we hope to accomplish in this project. Our first goal is to find and fit the best distribution to the number of buys and sells that users make within the three tokens we analyze. Towards this, we must first remove outliers, such as fraudulent transactions that seek to manipulate the token market (marked by highly improbable transaction amounts) and then explore various hypothetical distributions and distribution parameters that fit our token transactions. Finally, we select the distribution and parameters that best fit our transaction data. Our second goal in this project is to follow the top users within our various tokens through other tokens and use their transaction data to predict token prices. Towards this, we select the top k users (where k is a number we optimize for) from the tokens we analyze and track their buys in other tokens. We then explore correlations between their buys in various tokens and these tokens prices (within a date range of interest). Finally we develop linear regression models to see if we can model token price based on top user purchase patterns.
+
+
+## Preprocessing
+We first read in the token and remove data points that are not possible because the trade value exceeds the total supply of the coin. We also make sure to only read unique rows as some may be duplicated. Below, we show the code for this for the GNT token. We repeat the same process for SNT and BAT, but do not present the code for the sake of space. 
+
+\scriptsize
+```{r gntFilter}
+gnt <- read_delim('resources/networkgolemTX.txt', delim=" ", col_names=c('FromID','ToID','Time','TokenAmount'), col_types=cols())
+gnt <- gnt %>% distinct()
+#filter out tokens that are too large
+totalSupply <- 10^9
+decimals <- 10^18
+gntFiltered <- gnt %>% filter(TokenAmount < totalSupply * decimals)
+numFiltered <- (nrow(gnt) - nrow(gntFiltered))
+cat("Rows deleted from GNT: ", numFiltered)
+```
+
+```{r gntfraud}
+gntFraud <- gnt %>% filter(TokenAmount >= totalSupply * decimals)
+gntFraud <- data.frame(FromID=gntFraud$FromID, ToID=gntFraud$ToID)
+gntFraud <- unique(gntFraud)
+distinctFraud <- union(gntFraud$FromID, gntFraud$ToID)
+cat("Number of distinct IDs involved in fraud (GNT): ", length(distinctFraud))
+```
+
+\scriptsize
+```{r filtering, echo=FALSE}
+snt <- read_delim('resources/networkstatusnetworkTX.txt', delim=" ", col_names=c('FromID','ToID','Time','TokenAmount'), col_types=cols())
+snt <- snt %>% distinct()
+#filter out tokens that are too large
+totalSupply <- 6804870174.8781
+decimals <- 10^18
+sntFiltered <- snt %>% filter(TokenAmount < totalSupply * decimals)
+numFiltered <- (nrow(snt) - nrow(sntFiltered))
+cat("Rows deleted from SNT: ", numFiltered)
+
+sntFraud <- snt %>% filter(TokenAmount >= totalSupply * decimals)
+sntFraud <- data.frame(FromID=sntFraud$FromID, ToID=sntFraud$ToID)
+sntFraud <- unique(sntFraud)
+distinctFraud <- union(sntFraud$FromID, sntFraud$ToID)
+cat("Number of distinct IDs involved in fraud (SNT): ", length(distinctFraud))
+
+bat <- read_delim('resources/networkbatTX.txt', delim=" ", col_names=c('FromID','ToID','Time','TokenAmount'), col_types=cols())
+bat <- bat %>% distinct()
+#filter out tokens that are too large
+totalSupply <- 1500000000
+decimals <- 10^18
+batFiltered <- bat %>% filter(TokenAmount < totalSupply * decimals)
+numFiltered <- (nrow(bat) - nrow(batFiltered))
+cat("Rows deleted from BAT: ", numFiltered)
+
+batFraud <- bat %>% filter(TokenAmount >= totalSupply * decimals)
+batFraud <- data.frame(FromID=batFraud$FromID, ToID=batFraud$ToID)
+batFraud <- unique(batFraud)
+distinctFraud <- union(batFraud$FromID, batFraud$ToID)
+cat("Number of distinct IDs involved in fraud (BAT): ", length(distinctFraud))
+```
+
+## Task 1
+
+\small
+We decided to fit distributions on total amount of trades between users as the distribution of this data was quite similar to the distribution of buys and sells data independently. First, we count the total amount of trades between users, regardless of who is the seller and and who is the buyer, essentially turning the directed graph into an undirected graph. We present the code to do this for GNT. For the sake of space, we skip showing this for SNT and BAT.
+
+### Distribution of Transactions Between A Pair of Users (GNT)
+
+\scriptsize
+```{r gntDistrib}
+#Count the amount of trades between each pair of users (From User1 to User2)
+gnt1 <- summarise(group_by(gntFiltered,FromID,ToID), count=n())
+#Reverse the edge to count the other way as well (From User2 to User1)
+gnt2 <- summarise(group_by(gntFiltered, ToID, FromID), count=n())
+
+#rename both tables in order to do an equijoin
+names(gnt2) <- c('user1', 'user2', 'count')
+names(gnt1) <- c('user1', 'user2', 'count2')
+
+#equijoin on the tables and set any null data points to 0
+gntMerged <- merge(x=gnt1, y=gnt2, by=c("user1", "user2"), all=TRUE)
+gntMerged[is.na(gntMerged)] <- 0
+gntMerged$sum <- (gntMerged$count + gntMerged$count2)
+```
+
+\small
+We then filter out any number of transactions above 10 as we believe these to be outliers - possibly fradulent transactions between users attempting to manipulate the data. Just over 99% (828494/834690) of the pairwise trasactions are between 1-10 transactions, while < 1% include very high numbers such as 4000 that skew the data. Next, we fit this cleaned and filtered data to various hypothetical distributions and examine the quality of these fits:
+
+```{r gntFit}
+gntMerged_plot <- gntMerged %>% filter(sum < 11)
+fit_exp_gnt <- fitdist(gntMerged_plot$sum, "exp")
+fit_g_gnt <- fitdist(gntMerged_plot$sum, "gamma", lower=c(0,0), start=list(scale=1, shape=1))
+fit_ln_gnt <- fitdist(gntMerged_plot$sum, "lnorm")
+fit_log_gnt <- fitdist(gntMerged_plot$sum, "logis")
+fit_geometric_gnt <- fitdist(gntMerged_plot$sum, "geom")
+fit_pois_gnt <- fitdist(gntMerged_plot$sum, "pois")
+fit_weibull_gnt <- fitdist(gntMerged_plot$sum, "weibull")
+```
+
+\scriptsize
+```{r gntGoodness, echo=FALSE}
+gofstat(list(fit_exp_gnt, fit_g_gnt, fit_ln_gnt, fit_log_gnt, fit_geometric_gnt, fit_pois_gnt, fit_weibull_gnt))
+```
+
+\small
+From the Goodness of Fit test, we see that Logistic, Log-normal, and Gamma distributions fit this data best. We plot these 3 distributions. The Log-normal distribution appears to fit the best both visually and in of goodness of fit. Below we show the parameters of the fit.
+
+```{r gntPlot, echo=FALSE, fig.height=3, fig.width=4.5, fig.align='center'}
+plot.legend <- c("lognormal", "gamma", "logis")
+dcomp <- denscomp(list(fit_ln_gnt, fit_g_gnt, fit_log_gnt), legendtext=plot.legend, xlab="# of Transactions", xlim=c(1, 10), xlegend="topright", plotstyle="ggplot", breaks=11)
+dcomp + ggplot2::theme_minimal() + ggplot2::ggtitle("Transaction Distribution (GNT)")
+#p <- ggplot(gntmerged_plot, aes(x=sum))+ geom_histogram(color="darkblue", fill="lightblue", binwidth=1) 
+#p + labs(title="Transaction Distribution (GNT)") + xlab("# of Transactions") + theme(plot.title = element_text(size=10))
+```
+
+\scriptsize
+```{r gntDistSummary, echo=FALSE}
+print(summary(fit_ln_gnt))
+```
+
+### Distribution of Transactions Between A Pair of Users (SNT)
+
+\small
+Once again, we filter out outliers or possibly manipulated data. Just over 99% (488067/492774) of the pairwise transactions are between 1-11 transactions, so we filter out transactions above 11. We then fit this data to various distributions.
+
+```{r sntFit, echo=FALSE}
+#Count the amount of trades between each pair of users (From User1 to User2)
+snt1 <- summarise(group_by(sntFiltered,FromID,ToID), count=n())
+#Reverse the edge to count the other way as well (From User2 to User1)
+snt2 <- summarise(group_by(sntFiltered, ToID, FromID), count=n())
+
+#rename both tables in order to do an equijoin
+names(snt2) <- c('user1', 'user2', 'count')
+names(snt1) <- c('user1', 'user2', 'count2')
+
+#equijoin on the tables and set any null data points to 0
+sntMerged <- merge(x=snt1, y=snt2, by=c("user1", "user2"), all=TRUE)
+sntMerged[is.na(sntMerged)] <- 0
+sntMerged$sum <- (sntMerged$count + sntMerged$count2)
+
+sntMerged_plot <- sntMerged %>% filter(sum < 12)
+#p <- ggplot(sntmerged_plot, aes(x=sum))+ geom_histogram(color="darkblue", fill="lightblue", binwidth=1)
+#p + labs(title="Distribution of Transactions (SNT)")
+fit_exp_snt <- fitdist(sntMerged_plot$sum, "exp")
+fit_g_snt <- fitdist(sntMerged_plot$sum, "gamma", lower=c(0,0), start=list(scale=1, shape=1))
+fit_ln_snt <- fitdist(sntMerged_plot$sum, "lnorm")
+fit_log_snt <- fitdist(sntMerged_plot$sum, "logis")
+fit_geometric_snt <- fitdist(sntMerged_plot$sum, "geom")
+fit_pois_snt <- fitdist(sntMerged_plot$sum, "pois")
+fit_weibull_snt <- fitdist(sntMerged_plot$sum, "weibull")
+```
+
+\scriptsize
+```{r sntGoodness, echo=FALSE}
+gofstat(list(fit_exp_snt, fit_g_snt, fit_ln_snt, fit_log_snt, fit_geometric_snt, fit_pois_snt, fit_weibull_snt))
+```
+
+\small
+From the Goodness of Fit test, we can see that Weibull, Log-normal, and Gamma distributions fit this data best. We plot these 3 distributions. The Log-normal distribution appears to fit the best both visually and in terms of goodness of fit. This is quite similar to the distribution fits seen in the case of GNT, except that Weibull replaces Logistic in the top 3 fits. Below we show the parameters of the best fit.
+
+```{r sntPlot, echo=FALSE, fig.height=3, fig.width=4.5, fig.align='center'}
+plot.legend <- c("lognormal", "gamma", "weibull")
+dcomp <- denscomp(list(fit_ln_snt, fit_g_snt, fit_weibull_snt), legendtext=plot.legend, xlab="# of Transactions", xlim=c(1, 11), xlegend="topright", plotstyle="ggplot", breaks=12)
+dcomp + ggplot2::theme_minimal() + ggplot2::ggtitle("Transaction Distribution (SNT)")
+```
+
+\scriptsize
+```{r sntDistSummary, echo=FALSE}
+print(summary(fit_ln_snt))
+```
+
+### Distribution of Transactions Between a Pair of Users (BAT)
+
+\small
+Once again, we filter out outliers or possibly manipulated data. Just over 99% (380569/383636) of the pairwise transactions are between 1-10 transactions, so we filter out transactions above 10. This is similar to the previous distribution. We then fit this data to various hypothetical distributions.
+
+```{r batFit, echo=FALSE}
+#Count the amount of trades between each pair of users (From User1 to User2)
+bat1 <- summarise(group_by(batFiltered,FromID,ToID), count=n())
+#Reverse the edge to count the other way as well (From User2 to User1)
+bat2 <- summarise(group_by(batFiltered, ToID, FromID), count=n())
+
+#rename both tables in order to do an equijoin
+names(bat2) <- c('user1', 'user2', 'count')
+names(bat1) <- c('user1', 'user2', 'count2')
+
+#equijoin on the tables and set any null data points to 0
+batMerged <- merge(x=bat1, y=bat2, by=c("user1", "user2"), all=TRUE)
+batMerged[is.na(batMerged)] <- 0
+batMerged$sum <- (batMerged$count + batMerged$count2)
+
+batMerged_plot <- batMerged %>% filter(sum < 11)
+
+#p <- ggplot(bnbmerged_plot, aes(x=sum))+ geom_histogram(color="darkblue", fill="lightblue", binwidth=1)
+#p + labs(title="Distribution of Transactions (BNB)")
+
+fit_exp_ten <- fitdist(batMerged_plot$sum, "exp")
+fit_g_ten <- fitdist(batMerged_plot$sum, "gamma", lower=c(0,0), start=list(scale=1, shape=1))
+fit_ln_ten <- fitdist(batMerged_plot$sum, "lnorm")
+fit_log_ten <- fitdist(batMerged_plot$sum, "logis")
+fit_geometric_ten <- fitdist(batMerged_plot$sum, "geom")
+fit_pois_ten <- fitdist(batMerged_plot$sum, "pois")
+fit_weibull_ten <- fitdist(batMerged_plot$sum, "weibull")
+```
+
+\scriptsize
+```{r batGoodness, echo=FALSE}
+gofstat(list(fit_exp_ten, fit_g_ten, fit_ln_ten, fit_log_ten, fit_geometric_ten, fit_pois_ten, fit_weibull_ten))
+```
+
+\small
+From the Goodness of Fit test, we can see that Gamma, Log-normal, and Logistic distributions fit this data best. We plot these 3 distributions. The Log-normal distribution appears to fit the best both visually and in terms of goodness of fit. This is similar to the previously seen GNT distribution. Below we show the parameters of the best fit.
+
+```{r batPlot, echo=FALSE, fig.height=3, fig.width=4.5, fig.align='center'}
+plot.legend <- c("lognormal", "gamma", "logis")
+dcomp <- denscomp(list(fit_ln_ten, fit_g_ten, fit_log_ten), legendtext=plot.legend, xlab="# of Transactions", xlim=c(1, 10), xlegend="topright", plotstyle="ggplot", breaks=11)
+dcomp + ggplot2::theme_minimal() + ggplot2::ggtitle("Transaction Distribution (BAT)")
+```
+
+\scriptsize
+```{r batDistSummary, echo=FALSE}
+print(summary(fit_ln_ten))
+```
+
+## Task 2
+
+\small
+Examining token price history across several tokens, we noticed that there was a severe market peak around January 13th, 2018. Since we are tasked with developing a regression model to determine token price (given the purchasing features of the top k users from our analyzed tokens as regressors), we focus on purchasing patterns of the week preceding this market peak on January 13th, 2018 and attempt to develop a model that predicts token price at this peak. 
+
+### Regression Model on Top K Buys and Closing Price (GNT)
+
+We begin by finding the optimal top K users within the GNT token using a grid search approach. We do this by taking the top K users within GNT and tracking their buys in all other tokens in the week preceding the market peak. We then searching for the K that maximizes the R-squared measure of a simple regression between number of buys in the week preceding the market peak and closing price of tokens on the peak. 
+
+```{r gntKSearch, echo=FALSE}
+gntFiltered$formatDate <- as.Date(anytime(gntFiltered$Time))
+
+## number of buys by user id 
+gnt.buys <- gntFiltered %>% group_by(ToID) %>% summarise(buys=n()) %>% ungroup
+
+gntKSearch <- vector()
+testK <- c(1, 3, 5, 10, 15, 30)
+for(j in testK){
+  # top k buyers and their number of buys
+  gnt.buysTop <- gnt.buys %>% arrange(-buys) %>% head(j)
+  
+  ## dataframe to track top k user features vs closing price
+  gntTrackedFeatures <- data.frame(buys=integer(), meanVolume=double(), totalVolume=double(), lagClose=double(), priceClose=double())
+  path = "./tokenGraphs"
+  gntFile.names <- dir(path, pattern =".txt")
+  setwd("./tokenGraphs")
+  
+  # iterate through all other tokens
+  for(i in 1:length(gntFile.names)){
+    gntGraphFile <- read_delim(gntFile.names[i], delim=" ", col_names=c('FromID','ToID','Time','TokenAmount'), col_types=cols())
+    gntGraphFile$formatDate <- as.Date(anytime(gntGraphFile$Time))
+    # Examine data 1 week preceding the coin spike
+    gntGraphFileSpike <- subset(gntGraphFile, gntGraphFile$formatDate>="2018-01-06" & gntGraphFile$formatDate <="2018-01-13")
+    # select transactions where the top k users from our coin is buying
+    gntGraphFileSpikeFiltered <- subset(gntGraphFileSpike, ToID %in% gnt.buysTop$ToID)
+    tokenName <- substr(gntFile.names[i], 8, nchar(gntFile.names[i])-6)
+    message(tokenName)
+    path <- paste("../tokenPrices/", sep="", tokenName)
+    if (file.exists(path))
+    {
+      tokenPrice <- read_delim(path, delim="\t", skip=1, col_names=c('Date','Open','High','Low', 'Close', 'Volume', 'Cap'), col_types=cols())
+      # lag price at the start of the week
+      lagPriceOnPeak <- tokenPrice[which(tokenPrice$Date =='01/06/2018'),]
+      priceOnPeak <- tokenPrice[which(tokenPrice$Date =='01/13/2018'),]
+      point <- c(nrow(gntGraphFileSpikeFiltered), 
+                 mean(gntGraphFileSpikeFiltered$TokenAmount), 
+                 sum(gntGraphFileSpikeFiltered$TokenAmount), 
+                 lagPriceOnPeak[1,5]$Close,
+                 priceOnPeak[1,5]$Close)
+      gntTrackedFeatures[nrow(gntTrackedFeatures) + 1,] = point
+    }
+  }
+  setwd("..")
+  gntTrackedFeatures <- gntTrackedFeatures[complete.cases(gntTrackedFeatures), ]
+  gntSimpFit <- lm(priceClose ~ log1p(buys), data=gntTrackedFeatures)
+  gntKSearch <- append(gntKSearch, summary(gntSimpFit)$r.squared)
+}
+cat("Optimal Top K users (GNT): ", testK[which.max(gntKSearch)])
+```
+
+\small
+Having found the optimal K, we track the purchasing patterns of these top K users in GNT across all other tokens in the week preceding the market peak.
+
+```{r gntTrack, echo=FALSE}
+gntFiltered$formatDate <- as.Date(anytime(gntFiltered$Time))
+
+## number of buys by user id 
+gnt.buys <- gntFiltered %>% group_by(ToID) %>% summarise(buys=n()) %>% ungroup
+
+## Use the Opt K found in the preceding grid search to mark users whose purchasing patterns we track 
+message("Using K = ", testK[which.max(gntKSearch)])
+gnt.buysTop <- gnt.buys %>% arrange(-buys) %>% head(testK[which.max(gntKSearch)])
+
+## dataframe to track top k user features vs closing price
+gntTrackedFeatures <- data.frame(buys=integer(), meanVolume=double(), totalVolume=double(), lagClose=double(), priceClose=double())
+path = "./tokenGraphs"
+gntFile.names <- dir(path, pattern =".txt")
+setwd("./tokenGraphs")
+
+# iterate through all other tokens
+for(i in 1:length(gntFile.names)){
+  gntGraphFile <- read_delim(gntFile.names[i], delim=" ", col_names=c('FromID','ToID','Time','TokenAmount'), col_types=cols())
+  gntGraphFile$formatDate <- as.Date(anytime(gntGraphFile$Time))
+  # Examine data 1 week preceding the coin spike
+  gntGraphFileSpike <- subset(gntGraphFile, gntGraphFile$formatDate>="2018-01-06" & gntGraphFile$formatDate <="2018-01-13")
+  # select transactions where the top k users from our coin is buying
+  gntGraphFileSpikeFiltered <- subset(gntGraphFileSpike, ToID %in% gnt.buysTop$ToID)
+  tokenName <- substr(gntFile.names[i], 8, nchar(gntFile.names[i])-6)
+  message(tokenName)
+  path <- paste("../tokenPrices/", sep="", tokenName)
+  if (file.exists(path))
+  {
+    tokenPrice <- read_delim(path, delim="\t", skip=1, col_names=c('Date','Open','High','Low', 'Close', 'Volume', 'Cap'), col_types=cols())
+    # lag price at the start of the week
+    lagPriceOnPeak <- tokenPrice[which(tokenPrice$Date =='01/06/2018'),]
+    priceOnPeak <- tokenPrice[which(tokenPrice$Date =='01/13/2018'),]
+    point <- c(nrow(gntGraphFileSpikeFiltered), 
+               mean(gntGraphFileSpikeFiltered$TokenAmount), 
+               sum(gntGraphFileSpikeFiltered$TokenAmount), 
+               lagPriceOnPeak[1,5]$Close,
+               priceOnPeak[1,5]$Close)
+    gntTrackedFeatures[nrow(gntTrackedFeatures) + 1,] = point
+  }
+}
+setwd("..")
+# Remove incomplete data
+gntTrackedFeatures <- gntTrackedFeatures[complete.cases(gntTrackedFeatures), ]
+```
+
+\small
+We then examine this data to get an understanding of what features should be used in our regression
+
+```{r gntExplore, echo=FALSE, fig.align='center'}
+plot(gntTrackedFeatures, main='GNT Tracked Feature Exploration')
+
+plot(data.frame(buys=gntTrackedFeatures$buys,
+                logBuys=log1p(gntTrackedFeatures$buys),
+                logTotVol=log1p(gntTrackedFeatures$totalVolume), 
+                TotVol=gntTrackedFeatures$totalVolume, 
+                logMeanVol=log1p(gntTrackedFeatures$meanVolume), 
+                MeanVol=gntTrackedFeatures$meanVolume,
+                priceCl=gntTrackedFeatures$priceClose), main='GNT Tracked Feature Transformation')
+
+cat("GNT Tracked Feature Pearson Correlation:")
+cor(data.frame(logBuys=log1p(gntTrackedFeatures$buys), 
+               buys=gntTrackedFeatures$buys,
+               logTotVol=log1p(gntTrackedFeatures$totalVolume), 
+               TotVol=gntTrackedFeatures$totalVolume, 
+               logMeanVol=log1p(gntTrackedFeatures$meanVolume), 
+               MeanVol=gntTrackedFeatures$meanVolume, 
+               priceCl=gntTrackedFeatures$priceClose))
+```
+
+\small
+From this exploration we see that a log transformation on buys may be appropriate, and that mean volume of token buys is superior to total volume. We now turn to developing a regression model using these features.
+
+```{r gntSimpRegression, echo=FALSE, fig.align='center'}
+gntSimpFit <- lm(priceClose ~ log1p(buys), data=gntTrackedFeatures)
+print(summary(gntSimpFit))
+plot(log1p(gntTrackedFeatures$buys), gntTrackedFeatures$priceClose, 
+     main='Simple Linear Regression (GNT)',
+     xlab='Buys (Log Transform)',
+     ylab='Closing Price')
+abline(gntSimpFit, col='blue')
+legend("topright", legend=c("Linear Regression Fit"), col=c("blue"), lty=1)
+
+plot(gntTrackedFeatures$priceClose, gntSimpFit$residuals,
+     main='Simple Linear Regression - Residuals (GNT)',
+     xlab='Price Close',
+     ylab='Residuals')
+abline(h=0, col='blue')
+legend("bottomright", legend=c("y = 0"), col=c("blue"), lty=1)
+
+plot(gntTrackedFeatures$priceClose, predict(gntSimpFit),
+     main='Simple Linear Regression - Prediction (GNT)',
+     xlab='Price Close',
+     ylab='Model Prediction')
+abline(a=0, b=1, col='blue')
+legend("bottomright", legend=c("y = x"), col=c("blue"), lty=1)
+```
+
+\small
+We get a decent simple linear regression. Might outlier removal help?
+
+```{r gntOutlier, echo=FALSE, fig.align='center'}
+gntTrackedFeaturesFilt <- gntTrackedFeatures %>% filter(buys < 2500 & priceClose < 50)
+
+gntSimpFitFilt <- lm(priceClose ~ log1p(buys), data=gntTrackedFeaturesFilt)
+cat("Linear Regression After Outlier Removal (Log Transform):")
+print(summary(gntSimpFitFilt))
+
+gntSimpFitFilt <- lm(priceClose ~ buys, data=gntTrackedFeaturesFilt)
+cat("Linear Regression After Outlier Removal:")
+print(summary(gntSimpFitFilt))
+```
+
+\small
+Outlier removal made our simple model worse. Lets look at making the model more complex by adding more tracked features.
+
+```{r gntComplexRegression, echo=FALSE, fig.align='center'}
+gntMultFit <- lm(priceClose ~ log1p(buys) + meanVolume, data=gntTrackedFeatures)
+print(summary(gntMultFit))
+plot(gntTrackedFeatures$priceClose, gntMultFit$residuals,
+     main='Mutliple Linear Regression - Residuals (GNT)',
+     xlab='Price Close',
+     ylab='Residuals')
+abline(h=0, col='blue')
+legend("bottomright", legend=c("y = 0"), col=c("blue"), lty=1)
+
+plot(gntTrackedFeatures$priceClose, predict(gntMultFit),
+     main='Mutliple Linear Regression - Prediction (GNT)',
+     xlab='Price Close',
+     ylab='Model Prediction')
+abline(a=0, b=1, col='blue')
+legend("bottomright", legend=c("y = x"), col=c("blue"), lty=1)
+
+#better, but didnt add much predictive power, lets bring in the lag variable
+gntCompFit <- lm(priceClose ~ log1p(buys) + meanVolume + lagClose, data=gntTrackedFeatures)
+print(summary(gntCompFit))
+plot(gntTrackedFeatures$priceClose, gntCompFit$residuals,
+     main='Complex Linear Regression - Residuals (GNT)',
+     xlab='Price Close',
+     ylab='Residuals')
+abline(h=0, col='blue')
+legend("bottomright", legend=c("y = 0"), col=c("blue"), lty=1)
+
+plot(gntTrackedFeatures$priceClose, predict(gntCompFit),
+     main='Complex Linear Regression - Prediction (GNT)',
+     xlab='Price Close',
+     ylab='Model Prediction')
+abline(a=0, b=1, col='blue')
+legend("bottomright", legend=c("y = x"), col=c("blue"), lty=1)
+```
+
+\small
+We find a decent model using only buys (with a log transform) and mean volume. Including a lag variable (token closing price a week preceding the market peak), we get a tremendously predictive model. This might not be a "fair" variable to include in our model however. Below we provide the coefficients for our models.
+
+```{r gntRegressionRes, echo=FALSE}
+cat("Multiple Linear Regression Model (GNT):")
+print(gntMultFit)
+
+cat("Complex Linear Regression Model (GNT):")
+print(gntCompFit)
+```
+
+### Regression Model on Top K Buys and Closing Price (SNT)
+
+\small
+A similar K search, feature exploration, and regression modeling approach seen in GNT is followed for the SNT token.
+
+```{r sntKSearch, echo=FALSE}
+sntFiltered$formatDate <- as.Date(anytime(sntFiltered$Time))
+
+## number of buys by user id 
+snt.buys <- sntFiltered %>% group_by(ToID) %>% summarise(buys=n()) %>% ungroup
+
+sntKSearch <- vector()
+testK <- c(1, 3, 5, 10, 15, 30)
+for(j in testK){
+  # top k buyers and their number of buys
+  snt.buysTop <- snt.buys %>% arrange(-buys) %>% head(j)
+  
+  ## dataframe to track top k user features vs closing price
+  sntTrackedFeatures <- data.frame(buys=integer(), meanVolume=double(), totalVolume=double(), lagClose=double(), priceClose=double())
+  path = "./tokenGraphs"
+  sntFile.names <- dir(path, pattern =".txt")
+  setwd("./tokenGraphs")
+  
+  # iterate through all other tokens
+  for(i in 1:length(sntFile.names)){
+    sntGraphFile <- read_delim(sntFile.names[i], delim=" ", col_names=c('FromID','ToID','Time','TokenAmount'), col_types=cols())
+    sntGraphFile$formatDate <- as.Date(anytime(sntGraphFile$Time))
+    # Examine data 1 week preceding the coin spike
+    sntGraphFileSpike <- subset(sntGraphFile, sntGraphFile$formatDate>="2018-01-06" & sntGraphFile$formatDate <="2018-01-13")
+    # select transactions where the top k users from our coin is buying
+    sntGraphFileSpikeFiltered <- subset(sntGraphFileSpike, ToID %in% snt.buysTop$ToID)
+    tokenName <- substr(sntFile.names[i], 8, nchar(sntFile.names[i])-6)
+    message(tokenName)
+    path <- paste("../tokenPrices/", sep="", tokenName)
+    if (file.exists(path))
+    {
+      tokenPrice <- read_delim(path, delim="\t", skip=1, col_names=c('Date','Open','High','Low', 'Close', 'Volume', 'Cap'), col_types=cols())
+      # lag price at the start of the week
+      lagPriceOnPeak <- tokenPrice[which(tokenPrice$Date =='01/06/2018'),]
+      priceOnPeak <- tokenPrice[which(tokenPrice$Date =='01/13/2018'),]
+      point <- c(nrow(sntGraphFileSpikeFiltered), 
+                 mean(sntGraphFileSpikeFiltered$TokenAmount), 
+                 sum(sntGraphFileSpikeFiltered$TokenAmount), 
+                 lagPriceOnPeak[1,5]$Close,
+                 priceOnPeak[1,5]$Close)
+      sntTrackedFeatures[nrow(sntTrackedFeatures) + 1,] = point
+    }
+  }
+  setwd("..")
+  sntTrackedFeatures <- sntTrackedFeatures[complete.cases(sntTrackedFeatures), ]
+  sntSimpFit <- lm(priceClose ~ log1p(buys), data=sntTrackedFeatures)
+  sntKSearch <- append(sntKSearch, summary(sntSimpFit)$r.squared)
+}
+cat("Optimal Top K users (SNT): ", testK[which.max(sntKSearch)])
+```
+
+\small
+Having found the optimal K, we track the purchasing patterns of these top K users in SNT across all other tokens in the week preceding the market peak.
+
+```{r sntTrack, echo=FALSE}
+sntFiltered$formatDate <- as.Date(anytime(sntFiltered$Time))
+
+## number of buys by user id 
+snt.buys <- sntFiltered %>% group_by(ToID) %>% summarise(buys=n()) %>% ungroup
+
+## Use the Opt K found in the preceding grid search to mark users whose purchasing patterns we track 
+message("Using K = ", testK[which.max(sntKSearch)])
+snt.buysTop <- snt.buys %>% arrange(-buys) %>% head(testK[which.max(sntKSearch)])
+
+## dataframe to track top k user features vs closing price
+sntTrackedFeatures <- data.frame(buys=integer(), meanVolume=double(), totalVolume=double(), lagClose=double(), priceClose=double())
+path = "./tokenGraphs"
+sntFile.names <- dir(path, pattern =".txt")
+setwd("./tokenGraphs")
+
+# iterate through all other tokens
+for(i in 1:length(sntFile.names)){
+  sntGraphFile <- read_delim(sntFile.names[i], delim=" ", col_names=c('FromID','ToID','Time','TokenAmount'), col_types=cols())
+  sntGraphFile$formatDate <- as.Date(anytime(sntGraphFile$Time))
+  # Examine data 1 week preceding the coin spike
+  sntGraphFileSpike <- subset(sntGraphFile, sntGraphFile$formatDate>="2018-01-06" & sntGraphFile$formatDate <="2018-01-13")
+  # select transactions where the top k users from our coin is buying
+  sntGraphFileSpikeFiltered <- subset(sntGraphFileSpike, ToID %in% snt.buysTop$ToID)
+  tokenName <- substr(sntFile.names[i], 8, nchar(sntFile.names[i])-6)
+  message(tokenName)
+  path <- paste("../tokenPrices/", sep="", tokenName)
+  if (file.exists(path))
+  {
+    tokenPrice <- read_delim(path, delim="\t", skip=1, col_names=c('Date','Open','High','Low', 'Close', 'Volume', 'Cap'), col_types=cols())
+    # lag price at the start of the week
+    lagPriceOnPeak <- tokenPrice[which(tokenPrice$Date =='01/06/2018'),]
+    priceOnPeak <- tokenPrice[which(tokenPrice$Date =='01/13/2018'),]
+    point <- c(nrow(sntGraphFileSpikeFiltered), 
+               mean(sntGraphFileSpikeFiltered$TokenAmount), 
+               sum(sntGraphFileSpikeFiltered$TokenAmount), 
+               lagPriceOnPeak[1,5]$Close,
+               priceOnPeak[1,5]$Close)
+    sntTrackedFeatures[nrow(sntTrackedFeatures) + 1,] = point
+  }
+}
+setwd("..")
+# Remove incomplete data
+sntTrackedFeatures <- sntTrackedFeatures[complete.cases(sntTrackedFeatures), ]
+```
+
+\small
+We then examine this data to get an understanding of what features should be used in our regression
+
+```{r sntExplore, echo=FALSE, fig.align='center'}
+plot(sntTrackedFeatures, main='SNT Tracked Feature Exploration')
+
+plot(data.frame(buys=sntTrackedFeatures$buys,
+                logBuys=log1p(sntTrackedFeatures$buys),
+                logTotVol=log1p(sntTrackedFeatures$totalVolume), 
+                TotVol=sntTrackedFeatures$totalVolume, 
+                logMeanVol=log1p(sntTrackedFeatures$meanVolume), 
+                MeanVol=sntTrackedFeatures$meanVolume,
+                priceCl=sntTrackedFeatures$priceClose), main='SNT Tracked Feature Transformation')
+
+cat("SNT Tracked Feature Pearson Correlation:")
+cor(data.frame(logBuys=log1p(sntTrackedFeatures$buys), 
+               buys=sntTrackedFeatures$buys,
+               logTotVol=log1p(sntTrackedFeatures$totalVolume), 
+               TotVol=sntTrackedFeatures$totalVolume, 
+               logMeanVol=log1p(sntTrackedFeatures$meanVolume), 
+               MeanVol=sntTrackedFeatures$meanVolume, 
+               priceCl=sntTrackedFeatures$priceClose))
+```
+
+\small
+From this exploration we see that a log transformation on buys may be appropriate, and that mean volume of token buys is superior to total volume. We now turn to developing a regression model using these features.
+
+```{r sntSimpRegression, echo=FALSE, fig.align='center'}
+sntSimpFit <- lm(priceClose ~ log1p(buys), data=sntTrackedFeatures)
+print(summary(sntSimpFit))
+plot(log1p(sntTrackedFeatures$buys), sntTrackedFeatures$priceClose, 
+     main='Simple Linear Regression (SNT)',
+     xlab='Buys (Log Transform)',
+     ylab='Closing Price')
+abline(sntSimpFit, col='blue')
+legend("topright", legend=c("Linear Regression Fit"), col=c("blue"), lty=1)
+
+plot(sntTrackedFeatures$priceClose, sntSimpFit$residuals,
+     main='Simple Linear Regression - Residuals (SNT)',
+     xlab='Price Close',
+     ylab='Residuals')
+abline(h=0, col='blue')
+legend("bottomright", legend=c("y = 0"), col=c("blue"), lty=1)
+
+plot(sntTrackedFeatures$priceClose, predict(sntSimpFit),
+     main='Simple Linear Regression - Prediction (SNT)',
+     xlab='Price Close',
+     ylab='Model Prediction')
+abline(a=0, b=1, col='blue')
+legend("bottomright", legend=c("y = x"), col=c("blue"), lty=1)
+```
+
+\small
+We get a decent simple linear regression. Might outlier removal help?
+
+```{r sntOutlier, echo=FALSE, fig.align='center'}
+sntTrackedFeaturesFilt <- sntTrackedFeatures %>% filter(buys < 2500 & priceClose < 50)
+
+sntSimpFitFilt <- lm(priceClose ~ log1p(buys), data=sntTrackedFeaturesFilt)
+cat("Linear Regression After Outlier Removal (Log Transform):")
+print(summary(sntSimpFitFilt))
+
+sntSimpFitFilt <- lm(priceClose ~ buys, data=sntTrackedFeaturesFilt)
+cat("Linear Regression After Outlier Removal:")
+print(summary(sntSimpFitFilt))
+```
+
+\small
+Outlier removal made our simple model worse. Lets look at making the model more complex by adding more tracked features.
+
+```{r sntComplexRegression, echo=FALSE, fig.align='center'}
+sntMultFit <- lm(priceClose ~ log1p(buys) + meanVolume, data=sntTrackedFeatures)
+print(summary(sntMultFit))
+plot(sntTrackedFeatures$priceClose, sntMultFit$residuals,
+     main='Mutliple Linear Regression - Residuals (SNT)',
+     xlab='Price Close',
+     ylab='Residuals')
+abline(h=0, col='blue')
+legend("bottomright", legend=c("y = 0"), col=c("blue"), lty=1)
+
+plot(sntTrackedFeatures$priceClose, predict(sntMultFit),
+     main='Mutliple Linear Regression - Prediction (SNT)',
+     xlab='Price Close',
+     ylab='Model Prediction')
+abline(a=0, b=1, col='blue')
+legend("bottomright", legend=c("y = x"), col=c("blue"), lty=1)
+
+#better, but didnt add much predictive power, lets bring in the lag variable
+sntCompFit <- lm(priceClose ~ log1p(buys) + meanVolume + lagClose, data=sntTrackedFeatures)
+print(summary(sntCompFit))
+plot(sntTrackedFeatures$priceClose, sntCompFit$residuals,
+     main='Complex Linear Regression - Residuals (SNT)',
+     xlab='Price Close',
+     ylab='Residuals')
+abline(h=0, col='blue')
+legend("bottomright", legend=c("y = 0"), col=c("blue"), lty=1)
+
+plot(sntTrackedFeatures$priceClose, predict(sntCompFit),
+     main='Complex Linear Regression - Prediction (SNT)',
+     xlab='Price Close',
+     ylab='Model Prediction')
+abline(a=0, b=1, col='blue')
+legend("bottomright", legend=c("y = x"), col=c("blue"), lty=1)
+```
+
+\small
+We find a decent model using only buys (with a log transform) and mean volume. Including a lag variable (token closing price a week preceding the market peak), we get a tremendously predictive model. This might not be a "fair" variable to include in our model however. Below we provide the coefficients for our models.
+
+```{r sntRegressionRes, echo=FALSE}
+cat("Multiple Linear Regression Model (SNT):")
+print(sntMultFit)
+
+cat("Complex Linear Regression Model (SNT):")
+print(sntCompFit)
+```
+
+### Regression Model on Top K Buys and Closing Price (BAT)
+
+\small
+Again, a similar approach as seen in the previous tokens is used for the BAT token.
+
+```{r batKSearch, echo=FALSE}
+batFiltered$formatDate <- as.Date(anytime(batFiltered$Time))
+
+## number of buys by user id 
+bat.buys <- batFiltered %>% group_by(ToID) %>% summarise(buys=n()) %>% ungroup
+
+batKSearch <- vector()
+testK <- c(5, 25, 100, 200, 230, 240)
+for(j in testK){
+  # top k buyers and their number of buys
+  bat.buysTop <- bat.buys %>% arrange(-buys) %>% head(j)
+  
+  ## dataframe to track top k user features vs closing price
+  batTrackedFeatures <- data.frame(buys=integer(), meanVolume=double(), totalVolume=double(), lagClose=double(), priceClose=double())
+  path = "./tokenGraphs"
+  batFile.names <- dir(path, pattern =".txt")
+  setwd("./tokenGraphs")
+  
+  # iterate through all other tokens
+  for(i in 1:length(batFile.names)){
+    batGraphFile <- read_delim(batFile.names[i], delim=" ", col_names=c('FromID','ToID','Time','TokenAmount'), col_types=cols())
+    batGraphFile$formatDate <- as.Date(anytime(batGraphFile$Time))
+    # Examine data 1 week preceding the coin spike
+    batGraphFileSpike <- subset(batGraphFile, batGraphFile$formatDate>="2018-01-06" & batGraphFile$formatDate <="2018-01-13")
+    # select transactions where the top k users from our coin is buying
+    batGraphFileSpikeFiltered <- subset(batGraphFileSpike, ToID %in% bat.buysTop$ToID)
+    tokenName <- substr(batFile.names[i], 8, nchar(batFile.names[i])-6)
+    message(tokenName)
+    path <- paste("../tokenPrices/", sep="", tokenName)
+    if (file.exists(path))
+    {
+      tokenPrice <- read_delim(path, delim="\t", skip=1, col_names=c('Date','Open','High','Low', 'Close', 'Volume', 'Cap'), col_types=cols())
+      # lag price at the start of the week
+      lagPriceOnPeak <- tokenPrice[which(tokenPrice$Date =='01/06/2018'),]
+      priceOnPeak <- tokenPrice[which(tokenPrice$Date =='01/13/2018'),]
+      point <- c(nrow(batGraphFileSpikeFiltered), 
+                 mean(batGraphFileSpikeFiltered$TokenAmount), 
+                 sum(batGraphFileSpikeFiltered$TokenAmount), 
+                 lagPriceOnPeak[1,5]$Close,
+                 priceOnPeak[1,5]$Close)
+      batTrackedFeatures[nrow(batTrackedFeatures) + 1,] = point
+    }
+  }
+  setwd("..")
+  batTrackedFeatures <- batTrackedFeatures[complete.cases(batTrackedFeatures), ]
+  batSimpFit <- lm(priceClose ~ log1p(buys), data=batTrackedFeatures)
+  batKSearch <- append(batKSearch, summary(batSimpFit)$r.squared)
+}
+cat("Optimal Top K users (BAT): ", testK[which.max(batKSearch)])
+```
+
+\small
+Having found the optimal K, we track the purchasing patterns of these top K users in BAT across all other tokens in the week preceding the market peak.
+
+```{r batTrack, echo=FALSE}
+batFiltered$formatDate <- as.Date(anytime(batFiltered$Time))
+
+## number of buys by user id 
+bat.buys <- batFiltered %>% group_by(ToID) %>% summarise(buys=n()) %>% ungroup
+
+## Use the Opt K found in the preceding grid search to mark users whose purchasing patterns we track
+message("Using K = ", testK[which.max(batKSearch)])
+bat.buysTop <- bat.buys %>% arrange(-buys) %>% head(testK[which.max(batKSearch)])
+
+## dataframe to track top k user features vs closing price
+batTrackedFeatures <- data.frame(buys=integer(), meanVolume=double(), totalVolume=double(), lagClose=double(), priceClose=double())
+path = "./tokenGraphs"
+batFile.names <- dir(path, pattern =".txt")
+setwd("./tokenGraphs")
+
+# iterate through all other tokens
+for(i in 1:length(batFile.names)){
+  batGraphFile <- read_delim(batFile.names[i], delim=" ", col_names=c('FromID','ToID','Time','TokenAmount'), col_types=cols())
+  batGraphFile$formatDate <- as.Date(anytime(batGraphFile$Time))
+  # Examine data 1 week preceding the coin spike
+  batGraphFileSpike <- subset(batGraphFile, batGraphFile$formatDate>="2018-01-06" & batGraphFile$formatDate <="2018-01-13")
+  # select transactions where the top k users from our coin is buying
+  batGraphFileSpikeFiltered <- subset(batGraphFileSpike, ToID %in% bat.buysTop$ToID)
+  tokenName <- substr(batFile.names[i], 8, nchar(batFile.names[i])-6)
+  message(tokenName)
+  path <- paste("../tokenPrices/", sep="", tokenName)
+  if (file.exists(path))
+  {
+    tokenPrice <- read_delim(path, delim="\t", skip=1, col_names=c('Date','Open','High','Low', 'Close', 'Volume', 'Cap'), col_types=cols())
+    # lag price at the start of the week
+    lagPriceOnPeak <- tokenPrice[which(tokenPrice$Date =='01/06/2018'),]
+    priceOnPeak <- tokenPrice[which(tokenPrice$Date =='01/13/2018'),]
+    point <- c(nrow(batGraphFileSpikeFiltered), 
+               mean(batGraphFileSpikeFiltered$TokenAmount), 
+               sum(batGraphFileSpikeFiltered$TokenAmount), 
+               lagPriceOnPeak[1,5]$Close,
+               priceOnPeak[1,5]$Close)
+    batTrackedFeatures[nrow(batTrackedFeatures) + 1,] = point
+  }
+}
+setwd("..")
+# Remove incomplete data
+batTrackedFeatures <- batTrackedFeatures[complete.cases(batTrackedFeatures), ]
+```
+
+\small
+We then examine this data to get an understanding of what features should be used in our regression
+
+```{r batExplore, echo=FALSE, fig.align='center'}
+plot(batTrackedFeatures, main='BAT Feature Exploration')
+
+plot(data.frame(buys=batTrackedFeatures$buys,
+                logBuys=log1p(batTrackedFeatures$buys),
+                logTotVol=log1p(batTrackedFeatures$totalVolume), 
+                TotVol=batTrackedFeatures$totalVolume, 
+                logMeanVol=log1p(batTrackedFeatures$meanVolume), 
+                MeanVol=batTrackedFeatures$meanVolume,
+                priceCl=batTrackedFeatures$priceClose), main='BAT Feature Transformation')
+
+cat("BAT Feature Pearson Correlation:")
+cor(data.frame(logBuys=log1p(batTrackedFeatures$buys), 
+               buys=batTrackedFeatures$buys,
+               logTotVol=log1p(batTrackedFeatures$totalVolume), 
+               TotVol=batTrackedFeatures$totalVolume, 
+               logMeanVol=log1p(batTrackedFeatures$meanVolume), 
+               MeanVol=batTrackedFeatures$meanVolume, 
+               priceCl=batTrackedFeatures$priceClose))
+```
+
+\small
+From this exploration we see that a log transformation on buys may be appropriate, and that mean volume of token buys is superior to total volume. We now turn to developing a regression model using these features.
+
+```{r batSimpRegression, echo=FALSE, fig.align='center'}
+batSimpFit <- lm(priceClose ~ log1p(buys), data=batTrackedFeatures)
+print(summary(batSimpFit))
+plot(log1p(batTrackedFeatures$buys), batTrackedFeatures$priceClose, 
+     main='Simple Linear Regression (BAT)',
+     xlab='Buys (Log Transform)',
+     ylab='Closing Price')
+abline(batSimpFit, col='blue')
+legend("topright", legend=c("Linear Regression Fit"), col=c("blue"), lty=1)
+
+plot(batTrackedFeatures$priceClose, batSimpFit$residuals,
+     main='Simple Linear Regression - Residuals (BAT)',
+     xlab='Price Close',
+     ylab='Residuals')
+abline(h=0, col='blue')
+legend("bottomright", legend=c("y = 0"), col=c("blue"), lty=1)
+
+plot(batTrackedFeatures$priceClose, predict(batSimpFit),
+     main='Simple Linear Regression - Prediction (BAT)',
+     xlab='Price Close',
+     ylab='Model Prediction')
+abline(a=0, b=1, col='blue')
+legend("bottomright", legend=c("y = x"), col=c("blue"), lty=1)
+```
+
+\small
+We get a decent simple linear regression. Might outlier removal help?
+
+```{r batOutlier, echo=FALSE, fig.align='center'}
+batTrackedFeaturesFilt <- batTrackedFeatures %>% filter(buys < 2500 & priceClose < 50)
+
+batSimpFitFilt <- lm(priceClose ~ log1p(buys), data=batTrackedFeaturesFilt)
+cat("Linear Regression After Outlier Removal (Log Transform):")
+print(summary(batSimpFitFilt))
+
+batSimpFitFilt <- lm(priceClose ~ buys, data=batTrackedFeaturesFilt)
+cat("Linear Regression After Outlier Removal:")
+print(summary(batSimpFitFilt))
+```
+
+\small
+Outlier removal made our simple model worse. Lets look at making the model more complex by adding more tracked features.
+
+```{r batComplexRegression, echo=FALSE, fig.align='center'}
+batMultFit <- lm(priceClose ~ log1p(buys) + meanVolume, data=batTrackedFeatures)
+print(summary(batMultFit))
+plot(batTrackedFeatures$priceClose, batMultFit$residuals,
+     main='Mutliple Linear Regression - Residuals (BAT)',
+     xlab='Price Close',
+     ylab='Residuals')
+abline(h=0, col='blue')
+legend("bottomright", legend=c("y = 0"), col=c("blue"), lty=1)
+
+plot(batTrackedFeatures$priceClose, predict(batMultFit),
+     main='Mutliple Linear Regression - Prediction (BAT)',
+     xlab='Price Close',
+     ylab='Model Prediction')
+abline(a=0, b=1, col='blue')
+legend("bottomright", legend=c("y = x"), col=c("blue"), lty=1)
+
+#better, but didnt add much predictive power, lets bring in the lag variable
+batCompFit <- lm(priceClose ~ log1p(buys) + meanVolume + lagClose, data=batTrackedFeatures)
+print(summary(batCompFit))
+plot(batTrackedFeatures$priceClose, batCompFit$residuals,
+     main='Complex Linear Regression - Residuals (BAT)',
+     xlab='Price Close',
+     ylab='Residuals')
+abline(h=0, col='blue')
+legend("bottomright", legend=c("y = 0"), col=c("blue"), lty=1)
+
+plot(batTrackedFeatures$priceClose, predict(batCompFit),
+     main='Complex Linear Regression - Prediction (BAT)',
+     xlab='Price Close',
+     ylab='Model Prediction')
+abline(a=0, b=1, col='blue')
+legend("bottomright", legend=c("y = x"), col=c("blue"), lty=1)
+```
+
+\small
+We find a decent model using only buys (with a log transform) and mean volume. Including a lag variable (token closing price a week preceding the market peak), we get a tremendously predictive model. This might not be a "fair" variable to include in our model however. Below we provide the coefficients for our models.
+
+```{r batRegressionRes, echo=FALSE, fig.align='center'}
+cat("Multiple Linear Regression Model (BAT):")
+print(batMultFit)
+
+cat("Complex Linear Regression Model (BAT):")
+print(batCompFit)
+```
+
+## Conclusion
+
+\small
+In Task 1, we found the distribution that best fit the tokens we analyzed was the Log-normal distribution. This is an interesting finding as we know from empirical data that the Log-normal distribution models human attention based behavior well, such as the length of comments posted in internet discussions or even the length of chess games. Most users genuinely interact with each other a few times (< 2), with a long tail dropping off after around 10 interactions. Since token / economic interaction can be understood as an attention mediated human activity, it makes sense that the Log Normal distribution best describes user activity on the tokens we analyzed.
+
+\small
+In Task 2, we set out to see if we could predict that closing price of various tokens on the market spike in early January 2018. Additionally, we wanted to make this prediction by only using the trading patterns (in the month preceding the month of this market spike) of select top users from the three tokens we analyzed. The generalized form of this is akin to asking: can we predict the health or closing price of tokens by following only an elite group of users? Our intuition here is that this a fool’s errand. We placed a low prior on the claim that any complex market could be predicted by following the market trends of a few actors. Our results however, do not completely support this low prior (at least in the humble time slice we analyzed). We find that in all three of our tokens, modeling a linear regression on just the number of buys of a astonishingly small group of elite users (on average 4) gave a decent prediction on closing price (an average R-squared of .45). Adding mean volume of tokens bought as a feature to this model, further improved our predictions. This improvement was meager due to some collinearity between buys and mean volume, but still an improvement across all tokens was seen. Finally adding a lag variable on the closing price of tokens one month before the market spike gave an incredibly predictive model. An unpredicted aspect of our findings was that the coefficients for the regressors in our three different models somewhat converged. This finding may indicate that an elite group of users that drive token markets exist:
+
+```{r conclusionReg, echo=FALSE, fig.align='center'}
+cat("## Complex Linear Regression Coefficients:")
+cat("## 				 GNT 		 SNT 		 BAT
+## Intercept 		3.333724e+00 	4.116161e+00 	2.966821e+00
+## Buys (Log) 	       -5.792472e-01   -7.298960e-01   -5.334557e-01
+## Mean Volume		2.194150e-23 	3.442237e-23 	2.137409e-23
+## Lag Price Close 	2.781995e+00 	2.754060e+00 	2.796724e+00")
+```
+
+\small
+At the risk of ignoring Taleb’s Black Swan theory, our findings gesture towards a slightly higher posterior on the generalized claim that a complex token market can be predicted by following the market trends of a few elite actors. While it would be fallacious to say our findings provide proof positive for such a claim, a deeper feature analysis and modeling in this domain may yield fruitful.
+
+
+# References
